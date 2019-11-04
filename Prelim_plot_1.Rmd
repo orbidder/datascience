@@ -1,0 +1,126 @@
+---
+title: "Data Incubator Capstone Plots"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Predicting the county level influenza vaccine demand using Medicare and Medicaid treatment records
+Every year, millions of Americans receive the influenza vaccine in order to avoid potentially serious complications as a result of influenza infection. These complications can be life threatening for the elderly, children, and those with respiratory diseases. However, anticipating the demand for influenza vaccines is a non-trivial public health issue. In this project, I will build a model for vaccines administered at the county-level, using the Physician and Other Supplier Public Use File dataset published by The Centres for Medicare and Medicaid Services. By producing this model, I hope to provide practitioners in public health with a tool that will enable them to anticipate the demand for the influenza vaccine in the future.
+
+# Proposed methodology:
+I will use the Random Forest regression algorithm to model the number of vaccines administered as a function of identified features. Example features may be the number of influenza cases in preceding years, demographic information (number of elderly and children) and the number of individuals treated for respiratory diseases in each county. This information is available in the CMS data set. Processing and analysing the data set will be challenging, because the data cover the period 2013 to 2018, with each year containing over 9 million treatment records. Demographic and Socio-economic data is available from the USDA Economic Research Service website, and some of that information may also informative in predicting the demand for the influenza vaccine.
+
+Here are some preliminary plots to demonstrate the feasibility of this project.
+
+First, I will load in CMS data for 2016 and 2017.
+
+
+```{r cars}
+library(data.table)
+data_2017 <- fread("Medicare_Provider_Utilization_and_Payment_Data__Physician_and_Other_Supplier_PUF_CY2017.csv")
+data_2016 <- fread("Medicare_Provider_Utilization_and_Payment_Data__Physician_and_Other_Supplier_PUF_CY2016.csv")
+head(data)
+```
+
+Subset the data by rows that contain records of influenza treatment in 2016 and administrations of the vaccine in 2017. Treatments should not include the word 'vaccine' (and will pertain mostly to diagnostic tests etc.), while vaccinations should include mentions of both 'vaccine' and 'influenza' in the treatment description.
+
+```{r}
+vac_2017 <- data_2017[grepl('vaccine', data_2017$`HCPCS Description`, ignore.case = T)] 
+vac_2017 <- vac_2017[grepl('influenza', vac_2017$`HCPCS Description`, ignore.case = T),]
+
+flu_2016 <- data_2016[grepl('influenza', data_2016$`HCPCS Description`, ignore.case = T),]
+flu_2016 <- flu_2016[!grepl('vaccine', flu_2016$`HCPCS Description` , ignore.case = T),]
+
+#Convert the full zip to the 5 digit zip code for compatibility with the county look-up table
+flu_2016$zip5 <- substr(flu_2016$`Zip Code of the Provider`,1,5)
+vac_2017$zip5 <- substr(vac_2017$`Zip Code of the Provider`,1,5)
+
+```
+
+Load in the look-up table so that zip codes in the CMS data can be linked to the county-level data obtained elsewhere. Credit for the look-up table to Nic Colley from Data-world.
+```{r}
+zip2count <- read.csv('niccolley-us-zipcode-to-county-state/niccolley-us-zipcode-to-county-state/data/zip_county_fips_2017_03.csv')
+
+colnames(zip2count)[1] <- 'zip5'
+zip2count$zip5 <- as.character(zip2count$zip5)
+
+for (i in 1:length(zip2count$stcountyfp)) {
+  if(nchar(zip2count$stcountyfp[i]) == 4){
+    zip2count$stcountyfp[i] <- paste('0',zip2count$stcountyfp[i], sep = '')
+  }
+}
+
+flu_2016 <- merge(flu_2016, zip2count[,c('zip5','stcountyfp')], by = 'zip5')
+vac_2017 <- merge(vac_2017, zip2count[,c('zip5','stcountyfp')], by = 'zip5', allow.cartesian=TRUE)
+
+colnames(flu_2016)[28] <- 'FIPS'
+colnames(vac_2017)[28] <- 'FIPS'
+
+```
+
+## Plot 1
+
+Let's plot a map of the Contiguous US states, colored by the number of vaccinations administered in each county in 2017.
+
+```{r map, echo=FALSE}
+library(sf)
+library(plyr)
+library(ggplot2)
+
+flu_sum <- ddply(flu_2016, 'FIPS', summarize, flu_treats = sum(`Number of Services`), state = unique(`State Code of the Provider`)[1])
+vac_sum <- ddply(vac_2017, 'FIPS', summarize, vac_admin = sum(`Number of Services`), n_providers = length(unique(`National Provider Identifier`)), state = unique(`State Code of the Provider`)[1])
+
+#Need to add the first digit back to FIPS code because these data didn't have them
+for (i in 1:length(flu_sum$FIPS)) {
+  if(nchar(flu_sum$FIPS[i]) == 4){
+    flu_sum$FIPS[i] <- paste('0',flu_sum$FIPS[i], sep = '')
+  }
+}
+
+for (i in 1:length(vac_sum$FIPS)) {
+  if(nchar(vac_sum$FIPS[i]) == 4){
+    vac_sum$FIPS[i] <- paste('0',vac_sum$FIPS[i], sep = '')
+  }
+}
+
+flu_sum$FIPS <- as.factor(flu_sum$FIPS)
+vac_sum$FIPS <- as.factor(vac_sum$FIPS)
+
+#Load in counties shapefile obtained from ESRI Website
+counties <- st_read('UScounties/UScounties.shp')
+head(counties[counties$STATE_NAME == 'Connecticut',])
+head(data_2017[data_2017$`State Code of the Provider` == "CT",])
+head(vac_2017)
+for (i in 1:length(counties$FIPS)) {
+  if(nchar(vac_sum$FIPS[i]) == 4){
+    vac_sum$FIPS[i] <- paste('0',vac_sum$FIPS[i], sep = '')
+  }
+}
+
+head(counties)
+
+#merge with the flu and vaccine data
+counties <- merge(counties, flu_sum, by = 'FIPS', all.x = T)
+counties <- merge(counties, vac_sum, by = 'FIPS', all.x = T)
+
+counties <- st_as_sf(counties)
+
+ggplot() + 
+  geom_sf(data = counties[!counties$STATE_NAME %in% c('Alaska', 'Hawaii'),], aes(fill = log(vac_admin))) +
+  theme_classic() + labs(title = "Number of Influenza Vaccination Administered in Each US County in 2017") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.line = element_blank())
+
+```
+
+Note that there are no data for counties in New England, possibly because of the way vaccinations are reported or claimed for on Medicare in these states. I will try to supplement these data with Medicare part D reporting data sets in future to ensure that these states are included in the analysis.
